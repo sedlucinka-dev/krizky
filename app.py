@@ -2,50 +2,44 @@ import streamlit as st
 import cv2
 import numpy as np
 
-st.title("Počítač křížků (Finalní Logic)")
+st.title("Počítač křížků (Detekce průsečíků)")
 
-img_file = st.camera_input("Vyfoťte papír s křížky")
+img_file = st.camera_input("Vyfoťte papír")
 
 if img_file is not None:
     bytes_data = img_file.getvalue()
     cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
     gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
     
-    # 1. Adaptivní prahování - citlivé na tenké čáry
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                   cv2.THRESH_BINARY_INV, 15, 2)
+    # 1. Rozostření pro odstranění mřížky
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
     
-    # 2. Skeletizace / Hledání středů (Topologie)
-    # Zjistíme "vzdálenost k okraji". Středy čar křížku budou mít nejvyšší hodnotu.
-    dist_transform = cv2.distanceTransform(thresh, cv2.DIST_L2, 5)
+    # 2. Detekce rohů (Harris Corner Detection)
+    # Křížek má v průsečíku silný "roh"
+    gray_float = np.float32(blurred)
+    dst = cv2.cornerHarris(gray_float, blockSize=5, ksize=3, k=0.04)
     
-    # Najdeme "lokální maxima" - to jsou středy křížků.
-    # Práh nastavíme na 50 % maximální vzdálenosti, abychom ignorovali šum.
-    _, sure_fg = cv2.threshold(dist_transform, 0.5 * dist_transform.max(), 255, 0)
-    sure_fg = np.uint8(sure_fg)
+    # Roztažení detekovaných bodů, aby byly lépe vidět
+    dst = cv2.dilate(dst, None)
     
-    # 3. Označení propojených komponent
-    # Každý odsouhlasený "střed" získá unikátní ID.
-    num_labels, labels = cv2.connectedComponents(sure_fg)
+    # 3. Filtr: Ponecháme jen nejsilnější body (prahování)
+    # Tím odfiltrujeme mřížku, protože ta není tak "ostrá" jako průsečík křížku
+    threshold_value = 0.05 * dst.max()
+    points = np.where(dst > threshold_value)
     
-    # num_labels obsahuje počet unikátních ID, včetně pozadí (ID 0).
-    count = num_labels - 1 
+    # 4. Seskupení blízkých bodů (aby jeden křížek nebyl 5 teček)
+    points_list = list(zip(points[1], points[0])) # (x, y)
+    final_points = []
     
-    # Vykreslení pro kontrolu
+    for pt in points_list:
+        # Přidáme bod, pokud je dostatečně daleko od ostatních již nalezených
+        if all(np.linalg.norm(np.array(pt) - np.array(fpt)) > 20 for fpt in final_points):
+            final_points.append(pt)
+    
+    # Vykreslení
     debug_img = cv2_img.copy()
-    
-    # Najdeme středy detekovaných komponent a zakreslíme k nim tečky
-    for i in range(1, num_labels):
-        # Maska pro aktuální komponentu
-        component_mask = np.zeros_like(thresh)
-        component_mask[labels == i] = 255
-        
-        # Najdeme těžiště komponenty
-        M = cv2.moments(component_mask)
-        if M["m00"] != 0:
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
-            cv2.circle(debug_img, (cX, cY), 7, (0, 255, 0), -1)
+    for pt in final_points:
+        cv2.circle(debug_img, pt, 10, (0, 255, 0), -1)
             
-    st.write(f"### Počet nalezených křížků: {count}")
-    st.image(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB), caption="Nalezené středy křížků", width=400)
+    st.write(f"### Počet nalezených křížků: {len(final_points)}")
+    st.image(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB), caption="Nalezené středy")
