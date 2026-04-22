@@ -2,49 +2,50 @@ import streamlit as st
 import cv2
 import numpy as np
 
-st.title("Počítač křížků (Final-v2)")
+st.title("Počítač křížků (Finalní Logic)")
 
-img_file = st.camera_input("Vyfoťte papír")
+img_file = st.camera_input("Vyfoťte papír s křížky")
 
 if img_file is not None:
     bytes_data = img_file.getvalue()
     cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
     gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
     
-    # 1. Rozostření - klíčový krok! Odstraní mřížku na papíře
-    blurred = cv2.medianBlur(gray, 5)
+    # 1. Adaptivní prahování - citlivé na tenké čáry
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 15, 2)
     
-    # 2. Inteligentní prahování (Otsu) - lépe izoluje inkoust od papíru
-    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # 2. Skeletizace / Hledání středů (Topologie)
+    # Zjistíme "vzdálenost k okraji". Středy čar křížku budou mít nejvyšší hodnotu.
+    dist_transform = cv2.distanceTransform(thresh, cv2.DIST_L2, 5)
     
-    # 3. Morfologie: Spojení kousků k sobě a odříznutí sousedů
-    # Použijeme větší kernel, aby se kousky křížku "slepily"
-    kernel_connect = np.ones((5,5), np.uint8)
-    connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_connect, iterations=2)
+    # Najdeme "lokální maxima" - to jsou středy křížků.
+    # Práh nastavíme na 50 % maximální vzdálenosti, abychom ignorovali šum.
+    _, sure_fg = cv2.threshold(dist_transform, 0.5 * dist_transform.max(), 255, 0)
+    sure_fg = np.uint8(sure_fg)
     
-    # Teď agresivní eroze, aby se oddělily křížky blízko u sebe
-    kernel_separate = np.ones((3,3), np.uint8)
-    processed = cv2.erode(connected, kernel_separate, iterations=3)
+    # 3. Označení propojených komponent
+    # Každý odsouhlasený "střed" získá unikátní ID.
+    num_labels, labels = cv2.connectedComponents(sure_fg)
     
-    # Najdeme kontury na vyčištěném obrázku
-    contours, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # num_labels obsahuje počet unikátních ID, včetně pozadí (ID 0).
+    count = num_labels - 1 
     
-    count = 0
+    # Vykreslení pro kontrolu
     debug_img = cv2_img.copy()
     
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
+    # Najdeme středy detekovaných komponent a zakreslíme k nim tečky
+    for i in range(1, num_labels):
+        # Maska pro aktuální komponentu
+        component_mask = np.zeros_like(thresh)
+        component_mask[labels == i] = 255
         
-        # 4. Filtr plochy - teď můžeme být přísnější, protože kousky jsou spojené
-        if 80 < area < 10000:
-            count += 1
-            cv2.drawContours(debug_img, [cnt], -1, (0, 255, 0), 3)
+        # Najdeme těžiště komponenty
+        M = cv2.moments(component_mask)
+        if M["m00"] != 0:
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+            cv2.circle(debug_img, (cX, cY), 7, (0, 255, 0), -1)
             
     st.write(f"### Počet nalezených křížků: {count}")
-    
-    # Vizualizace pro kontrolu
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB), caption="Detekce")
-    with col2:
-        st.image(processed, caption="Jak to vidí počítač")
+    st.image(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB), caption="Nalezené středy křížků", width=400)
