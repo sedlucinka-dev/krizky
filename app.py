@@ -2,58 +2,84 @@ import streamlit as st
 import cv2
 import numpy as np
 
-st.title("Počítač křížků (Foťák i Galerie)")
+st.title("Počítač křížků (Hledání šablony)")
 
-# 1. Výběr zdroje obrázku
-zdroj = st.radio("Vyberte způsob zadání:", ("Vyfotit přímo", "Nahrát z galerie"))
+st.write("Nahrajte fotku a dolaďte posuvníky tak, aby každý křížek měl právě jednu tečku.")
 
-img_file = None
+# Výběr zdroje obrázku
+zdroj = st.radio("Zvolte způsob nahrání:", ("Nahrát z galerie", "Vyfotit kamerou"))
 
-if zdroj == "Vyfotit přímo":
+if zdroj == "Vyfotit kamerou":
     img_file = st.camera_input("Vyfoťte papír")
 else:
-    img_file = st.file_uploader("Vyberte fotku z galerie", type=["jpg", "jpeg", "png"])
+    img_file = st.file_uploader("Vyberte fotku", type=["jpg", "jpeg", "png"])
+
+# Posuvníky pro manuální doladění detekce
+col_slider1, col_slider2 = st.columns(2)
+with col_slider1:
+    citlivost = st.slider("Citlivost detekce", min_value=0.40, max_value=0.90, value=0.65, step=0.05, 
+                          help="Nižší hodnota najde více křížků (i ty hůře nakreslené), ale může najít i šum.")
+with col_slider2:
+    min_vzdalenost = st.slider("Minimální vzdálenost", min_value=10, max_value=100, value=35, step=5,
+                               help="Pokud to jeden křížek označí více tečkami, zvyšte toto číslo. Odděluje to shluky.")
+
+# Funkce, která virtuálně "nakreslí" šablonu ideálního křížku
+def vytvor_sablonu(velikost=30, tloustka=3):
+    tpl = np.full((velikost, velikost), 255, dtype=np.uint8)
+    cv2.line(tpl, (5, 5), (velikost-5, velikost-5), 0, tloustka)
+    cv2.line(tpl, (velikost-5, 5), (5, velikost-5), 0, tloustka)
+    # Lehké rozmazání, aby to tolerovalo ruční kresbu
+    tpl = cv2.GaussianBlur(tpl, (5, 5), 0)
+    return tpl
 
 if img_file is not None:
-    # Převod souboru na obrázek pro OpenCV
+    # Načtení obrázku
     bytes_data = img_file.getvalue()
     cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
     
-    # --- LOGIKA "AUTOMAT", KTERÁ TI FUNGOVALA NEJLÉPE ---
+    # Změna velikosti fotky (aby to fungovalo stejně rychle na starém i novém mobilu)
+    max_šířka = 800
+    if cv2_img.shape[1] > max_šířka:
+        pomer = max_šířka / cv2_img.shape[1]
+        cv2_img = cv2.resize(cv2_img, (max_šířka, int(cv2_img.shape[0] * pomer)))
+
     gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
     
-    # Odstranění mřížky a šumu
-    blurred = cv2.medianBlur(gray, 5)
+    # Odstranění jemné mřížky z papíru
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # Adaptivní prahování odolné vůči stínům (velký blok 81)
-    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                   cv2.THRESH_BINARY_INV, 81, 12)
+    # 1. Vygenerování šablony a její hledání v obrázku
+    sablona = vytvor_sablonu()
+    vysledek = cv2.matchTemplate(blurred, sablona, cv2.TM_CCOEFF_NORMED)
     
-    # Vyčištění zbytků
-    kernel = np.ones((3,3), np.uint8)
-    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+    # 2. Filtrace podle "Citlivosti" z posuvníku
+    lokace = np.where(vysledek >= citlivost)
+    body = list(zip(*lokace[::-1])) # Souřadnice (x, y) všech potenciálních shod
     
-    # Separace křížků pomocí vzdálenostní transformace (hledání středů)
-    dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
-    _, sure_fg = cv2.threshold(dist_transform, 0.25 * dist_transform.max(), 255, 0)
-    sure_fg = np.uint8(sure_fg)
-    
-    # Nalezení a spočítání středů
-    contours, _ = cv2.findContours(sure_fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+    # 3. Slučování blízkých bodů (řeší problém se shluky a vícenásobným označením)
+    finalni_body = []
+    for pt in body:
+        ulozit = True
+        for fpt in finalni_body:
+            # Výpočet vzdálenosti mezi body
+            vzdalenost = np.sqrt((pt[0] - fpt[0])**2 + (pt[1] - fpt[1])**2)
+            if vzdalenost < min_vzdalenost:
+                ulozit = False # Bod je moc blízko jinému, ignorujeme ho
+                break
+        
+        if ulozit:
+            # Pokud bod není blízko žádnému jinému, přidáme ho (střed upravíme o půlku šablony)
+            stred_x = pt[0] + 15
+            stred_y = pt[1] + 15
+            finalni_body.append((stred_x, stred_y))
+            
+    # Vykreslení výsledků
     debug_img = cv2_img.copy()
-    count = 0
-    
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area > 3: # Ignorujeme mikroskopický šum
-            M = cv2.moments(cnt)
-            if M["m00"] != 0:
-                cX = int(M["m10"] / M["m00"])
-                cY = int(M["m01"] / M["m00"])
-                # Nakreslíme zelenou tečku na střed
-                cv2.circle(debug_img, (cX, cY), 12, (0, 255, 0), -1)
-                count += 1
-                
-    st.write(f"### Počet nalezených křížků: {count}")
-    st.image(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB), caption="Výsledek detekce")
+    for pt in finalni_body:
+        # Nakreslení jasně zelené tečky
+        cv2.circle(debug_img, pt, 12, (0, 255, 0), -1)
+        # Nakreslení tenkého černého okraje, aby to bylo vidět i na světlém pozadí
+        cv2.circle(debug_img, pt, 12, (0, 0, 0), 2)
+            
+    st.write(f"### Počet nalezených křížků: {len(finalni_body)}")
+    st.image(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB), caption="Výsledek")
